@@ -1,0 +1,6 @@
+.env
+reminders.db
+*.pyc
+__pycache__/
+*.md
+!README.md
