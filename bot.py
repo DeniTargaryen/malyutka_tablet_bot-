@@ -104,7 +104,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Привет! Я бот-напоминалка про таблетки.\n\n"
         "Я уже настроен отправлять:\n"
         "• Эсциталопрам — 06:00 МСК\n"
-        "• Ярина плюс — 19:00 МСК\n\n"
+        "• Ярина плюс — 19:10 МСК\n\n"
         "Команды:\n"
         "/setme — настроить напоминания для меня\n"
         "/list — показать напоминания\n"
@@ -316,17 +316,17 @@ async def setme(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     # добавим необходимые напоминания
     rid1 = add_reminder(chat_id, "06:00", "Эсциталопрам (утро)")
-    rid2 = add_reminder(chat_id, "19:00", "Ярина плюс (вечер)")
+    rid2 = add_reminder(chat_id, "19:10", "Ярина плюс (вечер)")
     # спланируем их немедленно с уникальными именами
     context.application.job_queue.run_daily(callback=send_reminder,
                                             time=datetime.time(hour=6, minute=0, tzinfo=MOSCOW),
                                             context={"reminder_id": rid1, "chat_id": chat_id},
                                             name=f"reminder_{rid1}")
     context.application.job_queue.run_daily(callback=send_reminder,
-                                            time=datetime.time(hour=19, minute=0, tzinfo=MOSCOW),
+                                            time=datetime.time(hour=19, minute=10, tzinfo=MOSCOW),
                                             context={"reminder_id": rid2, "chat_id": chat_id},
                                             name=f"reminder_{rid2}")
-    await update.message.reply_text("Добавлены напоминания: 06:00 — Эсциталопрам, 19:00 — Ярина плюс.")
+    await update.message.reply_text("Добавлены напоминания: 06:00 — Эсциталопрам, 19:10 — Ярина плюс.")
 
 
 async def update_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
