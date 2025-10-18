@@ -103,14 +103,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (
         "Привет! Я бот-напоминалка про таблетки.\n\n"
         "Я уже настроен отправлять:\n"
-        "• Эсциталопрам — 06:00 МСК\n"
-        "• Ярина плюс — 19:00 МСК\n\n"
+        "• Эсциталопрам:\n"
+        "  — Пн-Пт: 06:00 МСК\n"
+        "  — Сб-Вс: 12:00 МСК\n"
+        "• Ярина плюс — 19:00 МСК (каждый день)\n\n"
         "Команды:\n"
         "/setme — настроить напоминания для меня\n"
         "/list — показать напоминания\n"
         "/delete <id> — удалить напоминание\n"
         "/update <id> HH:MM — изменить время напоминания\n"
         "/settime HH:MM [метка] — добавить новое напоминание\n"
+        "/test — тестовое напоминание (сразу)\n"
     )
     await update.message.reply_text(txt)
 
@@ -201,9 +204,17 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
     text = f"{nickname}, выпей, пожалуйста, таблеточку{label_text}"
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Выпила", callback_data=f"took:{rem_id}")],
-        [InlineKeyboardButton("⏰ Отложить на 10 минут", callback_data=f"snooze:{rem_id}:10")]
+        [InlineKeyboardButton("⏰ Отложить на 30 минут", callback_data=f"snooze:{rem_id}:30")]
     ])
-    await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
+    message = await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
+    
+    # Создаем job для проверки через 30 минут, если не нажала кнопку
+    context.application.job_queue.run_once(
+        callback=send_ignored_reminder,
+        when=datetime.timedelta(minutes=30),
+        data={"reminder_id": rem_id, "chat_id": chat_id, "message_id": message.message_id},
+        name=f"ignore_check_{rem_id}_{message.message_id}"
+    )
 
 
 # повторное однократное напоминание через X минут (run_once)
@@ -215,7 +226,33 @@ async def send_snooze(context: ContextTypes.DEFAULT_TYPE):
     text = f"Напоминание (отложенное): пожалуйста, примите таблеточку — {note}"
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Выпила", callback_data=f"took:{rem_id}")],
-        [InlineKeyboardButton("⏰ Отложить ещё 10 минут", callback_data=f"snooze:{rem_id}:10")]
+        [InlineKeyboardButton("⏰ Отложить ещё 30 минут", callback_data=f"snooze:{rem_id}:30")]
+    ])
+    message = await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
+    
+    # Создаем job для проверки через 30 минут
+    context.application.job_queue.run_once(
+        callback=send_ignored_reminder,
+        when=datetime.timedelta(minutes=30),
+        data={"reminder_id": rem_id, "chat_id": chat_id, "message_id": message.message_id},
+        name=f"ignore_check_{rem_id}_{message.message_id}"
+    )
+
+
+# напоминание если проигнорировала
+async def send_ignored_reminder(context: ContextTypes.DEFAULT_TYPE):
+    job_ctx = context.job.data
+    rem_id = job_ctx.get("reminder_id")
+    chat_id = job_ctx.get("chat_id")
+    
+    rem = get_reminder(rem_id)
+    if not rem:
+        return
+    _, _, time_s, label, active = rem
+    
+    text = f"Солнышко, я заметил, что ты не ответила на напоминание 💊\n\nПожалуйста, не забудь про таблеточку — {label}. Твое здоровье очень важно! ❤️"
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Уже выпила", callback_data=f"took:{rem_id}")],
     ])
     await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
 
@@ -231,6 +268,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if parts[0] == "took":
         rem_id = int(parts[1])
         chat_id = query.message.chat_id
+        message_id = query.message.message_id
+        
+        # Отменяем job проверки игнора, если он есть
+        job_name = f"ignore_check_{rem_id}_{message_id}"
+        jobs = context.application.job_queue.get_jobs_by_name(job_name)
+        for job in jobs:
+            job.schedule_removal()
+        
         record_confirmation(rem_id, chat_id, note="confirmed via button")
         try:
             await query.edit_message_text("✅ Выпила")
@@ -242,6 +287,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rem_id = int(parts[1])
         minutes = int(parts[2])
         chat_id = query.message.chat_id
+        message_id = query.message.message_id
+        
+        # Отменяем job проверки игнора, если он есть
+        job_name = f"ignore_check_{rem_id}_{message_id}"
+        jobs = context.application.job_queue.get_jobs_by_name(job_name)
+        for job in jobs:
+            job.schedule_removal()
+        
         # подтвердим пользователю, что отложили
         try:
             await query.edit_message_text(f"Отложено на {minutes} минут.")
@@ -291,6 +344,7 @@ def main():
     app.add_handler(CommandHandler("setme", setme))
     app.add_handler(CommandHandler("settime", settime))
     app.add_handler(CommandHandler("update", update_cmd))
+    app.add_handler(CommandHandler("test", test_cmd))
     # Если БД пустая — создаём два напоминания по умолчанию для текущего пользователя.
     # Тут логика: при первом запуске бот не знает chat_id — поэтому добавляем напоминания
     # только когда пользователь напишет /start: ниже простой способ — если хочешь, можно добавить команду для регистрации.
@@ -318,15 +372,55 @@ async def setme(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rid1 = add_reminder(chat_id, "06:00", "Эсциталопрам (утро)")
     rid2 = add_reminder(chat_id, "19:00", "Ярина плюс (вечер)")
     # спланируем их немедленно с уникальными именами
+    # Для будних дней (пн-пт) - 06:00
     context.application.job_queue.run_daily(callback=send_reminder,
                                             time=datetime.time(hour=6, minute=0, tzinfo=MOSCOW),
+                                            days=(0, 1, 2, 3, 4),  # пн-пт
                                             data={"reminder_id": rid1, "chat_id": chat_id},
-                                            name=f"reminder_{rid1}")
+                                            name=f"reminder_{rid1}_weekday")
+    # Для выходных (сб-вс) - 12:00
+    context.application.job_queue.run_daily(callback=send_reminder,
+                                            time=datetime.time(hour=12, minute=0, tzinfo=MOSCOW),
+                                            days=(5, 6),  # сб-вс
+                                            data={"reminder_id": rid1, "chat_id": chat_id},
+                                            name=f"reminder_{rid1}_weekend")
+    # Второе напоминание одинаково для всех дней - 19:00
     context.application.job_queue.run_daily(callback=send_reminder,
                                             time=datetime.time(hour=19, minute=0, tzinfo=MOSCOW),
                                             data={"reminder_id": rid2, "chat_id": chat_id},
                                             name=f"reminder_{rid2}")
-    await update.message.reply_text("Добавлены напоминания: 06:00 — Эсциталопрам, 19:00 — Ярина плюс.")
+    await update.message.reply_text("Добавлены напоминания:\n• Пн-Пт: 06:00 — Эсциталопрам\n• Сб-Вс: 12:00 — Эсциталопрам\n• Каждый день: 19:00 — Ярина плюс")
+
+
+async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Тестовая команда - отправляет напоминание немедленно"""
+    chat_id = update.effective_chat.id
+    rows = list_reminders_for(chat_id)
+    if not rows:
+        await update.message.reply_text("У вас нет настроенных напоминаний. Используйте /setme")
+        return
+    
+    # Берем первое напоминание для теста
+    rid, time_s, label, active = rows[0]
+    
+    nickname = "Котик"
+    label_text = f" — {label}" if label else ""
+    text = f"🧪 ТЕСТ: {nickname}, выпей, пожалуйста, таблеточку{label_text}"
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Выпила", callback_data=f"took:{rid}")],
+        [InlineKeyboardButton("⏰ Отложить на 30 минут", callback_data=f"snooze:{rid}:30")]
+    ])
+    message = await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
+    
+    # Создаем job для проверки через 30 минут
+    context.application.job_queue.run_once(
+        callback=send_ignored_reminder,
+        when=datetime.timedelta(minutes=30),
+        data={"reminder_id": rid, "chat_id": chat_id, "message_id": message.message_id},
+        name=f"ignore_check_{rid}_{message.message_id}"
+    )
+    
+    await update.message.reply_text("Отправил тестовое напоминание!")
 
 
 async def update_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
